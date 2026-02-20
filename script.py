@@ -668,6 +668,8 @@ def parse_command(cmd):
     # Two-word param phrases -> canonical param name
     TWO_WORD_PARAMS = [
         ("pole height", "pole height"),
+        ("pole he",     "pole height"), # shorthand alias (e.g. "pole he = 0.6")
+        ("pole ht",     "pole height"), # shorthand alias
         ("hh_width",    "width"),      # handhole width alias
         ("hh_length",   "length"),     # handhole length alias
         # NOTE: "duct bank" is a category phrase, NOT a param.

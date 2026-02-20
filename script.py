@@ -5,7 +5,7 @@ from pyrevit import revit, forms
 from Autodesk.Revit.DB import *
 from Autodesk.Revit.DB.Plumbing import Pipe
 
-import clr, os, json, io, re
+import clr, os, json, io, re, pkgutil
 clr.AddReference("System")
 from System.Collections.Generic import List
 
@@ -20,11 +20,27 @@ FT_TO_M  = 0.3048
 # ============================================================
 
 def ai_is_available():
+    """pyRevit/IronPython-friendly package presence check."""
+    return pkgutil.find_loader("openai") is not None
+
+
+def _load_openai_module():
+    return __import__("openai")
+
+
+def _extract_ai_text(resp):
+    """Supports both OpenAI legacy dict responses and v1 object responses."""
+    # v0.x style: dict-like response
     try:
-        import openai
-        return True
+        return (resp["choices"][0]["message"]["content"] or "").strip()
     except:
-        return False
+        pass
+
+    # v1.x style: object response
+    try:
+        return (resp.choices[0].message.content or "").strip()
+    except:
+        return ""
 
 
 def ai_parse_command(cmd):
@@ -38,12 +54,16 @@ def ai_parse_command(cmd):
     }
     NOTE: action export_params_excel will be exported as CSV (Excel-readable) in pyRevit.
     """
-    try:
-        import openai
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            return None
+    if not ai_is_available():
+        return None
 
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return None
+
+    openai = _load_openai_module()
+
+    try:
         openai.api_key = api_key
 
         system_prompt = """
@@ -72,16 +92,28 @@ Rules:
 - Extract multiple filters if present (e.g. elevation > 644 and < 645).
 Return JSON only.
 """
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            temperature=0,
-            messages=[
-                {"role":"system","content":system_prompt},
-                {"role":"user","content":cmd}
-            ]
-        )
+        messages = [
+            {"role":"system","content":system_prompt},
+            {"role":"user","content":cmd}
+        ]
 
-        txt = (resp["choices"][0]["message"]["content"] or "").strip()
+        # Legacy OpenAI SDK path
+        try:
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                temperature=0,
+                messages=messages
+            )
+        except:
+            # OpenAI v1+ SDK path
+            client = openai.OpenAI(api_key=api_key)
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0,
+                messages=messages
+            )
+
+        txt = _extract_ai_text(resp)
         intent = json.loads(txt)
         if not isinstance(intent, dict):
             return None
@@ -1790,11 +1822,11 @@ def main():
             "elec_trenches": trench_numeric,
         }
         if category not in LENGTH_READERS:
-            forms.alert(
-                "Length sum is not supported for '{}'.
-
-"
-                "Supported: pipes, channels, electrical trenches.".format(category))
+            unsupported_msg = (
+                "Length sum is not supported for '{}'.\n\n"
+                "Supported: pipes, channels, electrical trenches."
+            ).format(category)
+            forms.alert(unsupported_msg)
         else:
             elems  = [doc.GetElement(i) for i in results]
             reader = LENGTH_READERS[category]

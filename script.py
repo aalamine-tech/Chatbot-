@@ -297,6 +297,94 @@ def _safe_str(x):
     except:
         return ""
 
+
+# Optional interactive mapping cache
+# key: (category, scope, logical_keyword) -> exact parameter name
+PARAM_NAME_CACHE = {}
+
+
+def _double_param_names(src_elem):
+    names = []
+    if not src_elem:
+        return names
+    try:
+        for p in src_elem.Parameters:
+            try:
+                if p.StorageType == StorageType.Double:
+                    n = p.Definition.Name
+                    if n and n not in names:
+                        names.append(n)
+            except:
+                pass
+    except:
+        pass
+    return sorted(names)
+
+
+def _read_exact_double_in_m(src_elem, param_name):
+    if not src_elem or not param_name:
+        return None
+    target = normalize(param_name)
+    try:
+        for p in src_elem.Parameters:
+            try:
+                n = p.Definition.Name
+                if n and normalize(n) == target and p.StorageType == StorageType.Double:
+                    return p.AsDouble() * FT_TO_M
+            except:
+                pass
+    except:
+        pass
+    return None
+
+
+def _ask_user_param_name(e, keyword, category=None, scope="type"):
+    """Ask once for an exact parameter name and cache the mapping."""
+    cat = category or "generic"
+    k = normalize(keyword)
+    key = (cat, scope, k)
+
+    if key in PARAM_NAME_CACHE:
+        return PARAM_NAME_CACHE.get(key)
+
+    target = None
+    if scope == "type":
+        try:
+            target = doc.GetElement(e.GetTypeId())
+        except:
+            target = None
+    else:
+        target = e
+
+    names = _double_param_names(target)
+    if not names:
+        return None
+
+    preview = "\n".join("  - " + n for n in names[:20])
+    prompt = (
+        "Could not find a numeric parameter containing '{}' for category '{}'.\n\n"
+        "Enter EXACT parameter name ({} parameter).\n"
+        "Available names (first 20):\n{}"
+    ).format(keyword, cat, scope, preview)
+
+    user_value = forms.ask_for_string(prompt=prompt, default=names[0])
+    if not user_value:
+        return None
+
+    typed = normalize(user_value)
+    exact = None
+    for n in names:
+        if normalize(n) == typed:
+            exact = n
+            break
+
+    if exact is None:
+        forms.alert("Parameter '{}' not found in {} parameters for '{}'.".format(user_value, scope, cat))
+        return None
+
+    PARAM_NAME_CACHE[key] = exact
+    return exact
+
 # ============================================================
 # DID YOU MEAN? (v18.9)
 # Fuzzy suggestion engine - no external libraries required.
@@ -478,24 +566,15 @@ def generic_numeric_by_keyword(e,key):
     return None
 
 
-def get_type_param(e, keyword, with_fallback=False):
+def get_type_param(e, keyword, with_fallback=False, category=None, interactive=False):
     """
     Shared utility: search TYPE parameters for a Double param
     whose name contains keyword (case-insensitive).
     Returns value in metres, or None.
 
-    with_fallback=False (default):
-        Type-only lookup. Returns None if not found in Type.
-        Use when the param is CONFIRMED to live on the Type
-        (e.g. HH_Width, HH_Length, Pole Height).
-
-    with_fallback=True:
-        Falls back to instance param scan if not in Type.
-        Use when param location is uncertain
-        (e.g. trench Width, Height).
-
-    Replaces: _get_type_param_by_keyword, _elec_type_param,
-              _get_trench_type_param  (v19.6)
+    Optional interactive=True:
+        If no keyword match is found, asks user once for the
+        exact parameter name and caches it for this session.
     """
     try:
         t = doc.GetElement(e.GetTypeId())
@@ -503,15 +582,30 @@ def get_type_param(e, keyword, with_fallback=False):
             kk = keyword.lower()
             for p in t.Parameters:
                 try:
-                    if kk in p.Definition.Name.lower():
-                        if p.StorageType == StorageType.Double:
-                            return p.AsDouble() * FT_TO_M
+                    if kk in p.Definition.Name.lower() and p.StorageType == StorageType.Double:
+                        return p.AsDouble() * FT_TO_M
                 except:
                     pass
+
+            if interactive:
+                exact_name = _ask_user_param_name(e, keyword, category=category, scope="type")
+                if exact_name:
+                    v = _read_exact_double_in_m(t, exact_name)
+                    if v is not None:
+                        return v
     except:
         pass
+
     if with_fallback:
-        return generic_numeric_by_keyword(e, keyword)
+        v = generic_numeric_by_keyword(e, keyword)
+        if v is not None:
+            return v
+
+        if interactive:
+            exact_name = _ask_user_param_name(e, keyword, category=category, scope="instance")
+            if exact_name:
+                return _read_exact_double_in_m(e, exact_name)
+
     return None
 
 # ============================================================
@@ -670,6 +764,11 @@ def channel_numeric(e,k):
     if kk in CHANNEL_NUMERIC_PARAMS:
         p=e.get_Parameter(CHANNEL_NUMERIC_PARAMS[kk])
         if p: return p.AsDouble()*FT_TO_M
+
+    # Width/Depth/Height may be modelled on Type in some families.
+    if kk in ("width", "depth", "height"):
+        return get_type_param(e, kk, with_fallback=True, category="channels", interactive=True)
+
     if kk in GENERIC_NUMERIC_KEYWORDS:
         return generic_numeric_by_keyword(e,kk)
     return None
@@ -831,7 +930,7 @@ def trench_numeric(e, k):
         return generic_numeric_by_keyword(e, "length")
 
     if kk in ("width", "height"):
-        return get_type_param(e, kk, with_fallback=True)
+        return get_type_param(e, kk, with_fallback=True, category="elec_trenches", interactive=True)
 
     # Generic fallback for any other keyword
     return generic_numeric_by_keyword(e, kk)
@@ -911,10 +1010,10 @@ def handhole_numeric(e, k):
     kk = (k or "").lower()
 
     if "width" in kk:
-        return get_type_param(e, "width")
+        return get_type_param(e, "width", category="handholes", interactive=True)
 
     if "length" in kk:
-        return get_type_param(e, "length")
+        return get_type_param(e, "length", category="handholes", interactive=True)
 
     if kk == "elevation":
         try:
@@ -967,7 +1066,7 @@ def lighting_pole_numeric(e, k):
     # Search TYPE params for any parameter whose name contains
     # "height" - broad enough to catch any naming convention.
     if kk == "pole height" or "height" in kk:
-        val = get_type_param(e, "height")
+        val = get_type_param(e, "height", category="lighting_poles", interactive=True)
         if val is not None:
             return val
         # Fallback: try instance params with "height" keyword
